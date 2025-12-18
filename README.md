@@ -87,25 +87,15 @@ and is where most operational and compliance risk accumulates in real environmen
 This diagram shows the decision → approval → execution → audit flow. No action is executed without explicit human approval. Each run produces an auditable JSON record.
 
 ```mermaid
-
 flowchart TD
-
-A[Windows Event Log] --> B[WinOps Guard Collector]
-
-B --> C[Structured JSON]
-
-C --> D[AI Triage (LLM)]
-
-D -->|Propose ONE safe action| E[Human Approval]
-
-E -->|No| F[Audit JSON (noop)]
-
-E -->|Yes| G[Whitelisted Command]
-
-G --> H[DISM / SFC / IIS]
-
-H --> I[Audit JSON (executed)]
-
+    A["Windows Event Log"] --> B["WinOps Guard Collector"]
+    B --> C["Structured JSON"]
+    C --> D["AI Triage (LLM)"]
+    D -->|"Propose ONE safe action"| E["Human Approval"]
+    E -->|"No"| F["Audit JSON (noop)"]
+    E -->|"Yes"| G["Whitelisted Command"]
+    G --> H["DISM / SFC / IIS"]
+    H --> I["Audit JSON (executed)"]
 ```
 
 ## What you get today / what’s planned
