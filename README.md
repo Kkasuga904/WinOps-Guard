@@ -12,6 +12,21 @@ It removes RDP, Event Viewer, and manual log inspection from incident response b
 
 ---
 
+## 60-second demo (no RDP)
+
+```powershell
+type testdata\windows_update_corruption.json |
+  .\winopsguard-triage.exe -provider openai |
+  .\winopsguard-remediate-update.exe
+```
+
+Result:
+
+- AI explains root cause (0x800f081f)
+- Proposes exactly one safe action (DISM RestoreHealth)
+- Requires explicit approval
+- Emits audit JSON (who / when / why / what)
+
 ## Problem
 
 Windows operations today still rely on:
