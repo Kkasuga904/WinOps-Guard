@@ -26,6 +26,8 @@ It is explaining — weeks or months later — **why a specific action was taken
 
 WinOps Guard exists to make that explanation reliable, repeatable, and defensible by default.
 
+In practice, teams adopt WinOps Guard not to run commands faster, but to avoid being unable to explain a production change when it matters most.
+
 ---
 
 ## Operational Risk Without This
@@ -42,7 +44,7 @@ WinOps Guard exists to make that explanation reliable, repeatable, and defensibl
 ### For
 
 - MSP and enterprise teams operating **50+ Windows Servers**
-- Environments where Update/servicing issues and IIS incidents happen weekly/monthly
+- Environments where Update/servicing issues and IIS incidents are operationally significant.
 - Organizations with RDP restrictions (security policy, jump hosts, audit controls)
 - Teams that need explainability and evidence for audits, customer reporting, or change governance
 
@@ -96,16 +98,18 @@ This diagram shows the decision → approval → execution → audit flow. No ac
 
 ---
 
+This diagram represents a single remediation lifecycle. Exactly one action may be proposed, approved, executed, and audited per run.
+
 ```mermaid
 flowchart TD
-    A["Windows Event Log"] --> B["WinOps Guard Collector"]
-    B --> C["Structured JSON"]
-    C --> D["AI Triage (LLM)"]
-    D -->|"Propose ONE safe action"| E["Human Approval"]
-    E -->|"No"| F["Audit JSON (noop)"]
-    E -->|"Yes"| G["Whitelisted Command"]
-    G --> H["DISM / SFC / IIS"]
-    H --> I["Audit JSON (executed)"]
+A["Windows Event Log"] --> B["WinOps Guard Collector"]
+B --> C["Structured JSON"]
+C --> D["AI Triage (LLM)"]
+D -->|"Propose ONE safe action"| E["Human Approval"]
+E -->|"No"| F["Audit JSON (noop)"]
+E -->|"Yes"| G["Whitelisted Command"]
+G --> H["DISM / SFC / IIS"]
+H --> I["Audit JSON (executed)"]
 ```
 
 ## What you get today / what’s planned
