@@ -1,1 +1,17 @@
 *.exe
+*.dll
+
+# local test artifacts
+triage*.json
+logs*.json
+cvekb*.json
+
+# secrets
+.env
+*.pem
+*.key
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

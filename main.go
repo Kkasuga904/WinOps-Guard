@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ const (
 	evtFormatMessageEvent            = 1
 	defaultLookbackMinutes           = 10
 	defaultMaxEvents                 = 256
+	defaultLogName                   = "application"
 	evtNextBatchSize          uint32 = 16
 )
 
@@ -100,12 +102,20 @@ func (c *publisherCache) close() {
 func main() {
 	minutes := flag.Int("minutes", defaultLookbackMinutes, "lookback window in minutes")
 	maxEvents := flag.Int("max", defaultMaxEvents, "maximum number of events to return")
+	logName := flag.String("log", defaultLogName, "event log channel: application|system|setup")
+	provider := flag.String("provider", "", "optional provider name filter (e.g. Microsoft-Windows-WindowsUpdateClient)")
 	flag.Parse()
 
-	events, err := fetchApplicationEvents(*minutes, *maxEvents)
+	channel, err := normalizeLogName(*logName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(2)
+	}
+
+	events, err := fetchEvents(channel, strings.TrimSpace(*provider), *minutes, *maxEvents)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
 	}
 
 	enc := json.NewEncoder(os.Stdout)
@@ -113,11 +123,24 @@ func main() {
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(events); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to encode JSON: %v\n", err)
-		os.Exit(1)
+		os.Exit(2)
 	}
 }
 
-func fetchApplicationEvents(minutes, maxEvents int) ([]eventRecord, error) {
+func normalizeLogName(name string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "application", "":
+		return "Application", nil
+	case "system":
+		return "System", nil
+	case "setup":
+		return "Setup", nil
+	default:
+		return "", fmt.Errorf("unsupported log: %s (use application|system|setup)", name)
+	}
+}
+
+func fetchEvents(logName, provider string, minutes, maxEvents int) ([]eventRecord, error) {
 	if minutes <= 0 {
 		minutes = defaultLookbackMinutes
 	}
@@ -126,12 +149,12 @@ func fetchApplicationEvents(minutes, maxEvents int) ([]eventRecord, error) {
 	}
 
 	ms := minutes * 60 * 1000
-	queryStr := fmt.Sprintf("*[System[TimeCreated[timediff(@SystemTime) <= %d]]]", ms)
+	queryStr := buildQuery(ms, provider)
 	queryPtr, err := windows.UTF16PtrFromString(queryStr)
 	if err != nil {
 		return nil, fmt.Errorf("query UTF16: %w", err)
 	}
-	pathPtr, err := windows.UTF16PtrFromString("Application")
+	pathPtr, err := windows.UTF16PtrFromString(logName)
 	if err != nil {
 		return nil, fmt.Errorf("path UTF16: %w", err)
 	}
@@ -169,6 +192,14 @@ func fetchApplicationEvents(minutes, maxEvents int) ([]eventRecord, error) {
 		}
 	}
 	return results, nil
+}
+
+func buildQuery(ms int, provider string) string {
+	if provider == "" {
+		return fmt.Sprintf("*[System[TimeCreated[timediff(@SystemTime) <= %d]]]", ms)
+	}
+	quotedProvider := strconv.Quote(provider)
+	return fmt.Sprintf("*[System[Provider[@Name=%s] and TimeCreated[timediff(@SystemTime) <= %d]]]", quotedProvider, ms)
 }
 
 func evtQuery(path, query *uint16) (windows.Handle, error) {

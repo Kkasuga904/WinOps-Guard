@@ -15,54 +15,51 @@ import (
 )
 
 const (
-	defaultProvider = "openai"
+	defaultProvider    = "openai"
 	defaultOpenAIModel = "gpt-4o-mini"
 	defaultGeminiModel = "gemini-1.5-flash"
-	defaultTimeout = 30 * time.Second
-	defaultMaxBytes = 5_000_000
-	openAIEndpoint = "https://api.openai.com/v1/chat/completions"
-	geminiEndpointFmt = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
-	maxOutputTokens = 1200
+	defaultTimeout     = 30 * time.Second
+	defaultMaxBytes    = 5_000_000
+	openAIEndpoint     = "https://api.openai.com/v1/chat/completions"
+	geminiEndpointFmt  = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
+	maxOutputTokens    = 1200
 )
 
-const systemPrompt = `You are an SRE-grade Windows operations triage engine.
-You MUST output valid JSON that strictly follows the schema below.
-Do NOT include explanations, markdown, or extra text.
-If you are unsure, return a low-confidence result with no actions.
-You are NOT allowed to invent commands.
-You must be conservative and risk-averse.`
+const systemPrompt = `You are a Senior Windows System Engineer specializing in OS servicing and update recovery.
+Analyze Windows Event Logs (Setup, System, WindowsUpdateClient) to diagnose update failures.
 
-const userPromptTemplate = `Input is a JSON array of Windows Event Log entries.
-Each entry has: timeGenerated, level, eventId, source, message.
+Diagnostic goals:
+1) Error Identification: extract hex codes (e.g., 0x800f0922, 0x8024200d).
+2) Component Health: decide if Component Store (WinSxS) is corrupted vs transient network/service issue.
+3) Recovery Path: decide if DISM/SFC are appropriate.
 
-Your task:
-1. Identify whether these events indicate a real operational problem.
-2. Classify the situation (noise / installer / windows_update / service / unknown).
-3. Decide whether ANY action is safe to recommend.
-4. Output ONLY the JSON object that follows the required schema.
+Remediation logic:
+- If logs indicate "Component Store Corrupt" or "Manifest missing": suggest DISM RestoreHealth.
+- If logs indicate "File not found" or "Integrity violation": suggest SFC Scannow.
+- If unsure: suggest Manual Investigation and do NOT provide a command.
 
-Constraints:
-- Prefer "no action" unless there is clear evidence of failure.
-- Do NOT suggest reboot, disk operations, registry edits, or destructive commands.
-- Windows Update failures must be clearly identified by source or error codes.
+Safety:
+- Never suggest registry edits or manual file deletions.
+- Only suggest idempotent, safe-to-rerun commands.
+Output must be JSON only.`
 
-REQUIRED OUTPUT SCHEMA (must be valid JSON):
+const userPromptTemplate = `Analyze the following signals provided in JSON:
+%s
+
+If security findings (CVE/KB) are present, incorporate them into the reasoning.
+Respond with JSON using this schema:
 {
-  "summary": string,
-  "severity": "info" | "warning" | "critical",
-  "confidence": number,
-  "classification": string,
-  "signals": [{"type":"event","source":string,"id":number}],
-  "actions": [{
-    "id": string,
-    "title": string,
-    "risk": "none" | "low" | "medium" | "high",
-    "commands": [{"shell":"powershell","cmd":string}]
-  }]
-}
-
-EVENTS_JSON:
-%s`
+  "incident_type": "windows_update_failure",
+  "error_code": "0xXXXXXXXX",
+  "analysis": "Briefly explain why the update failed based on logs.",
+  "severity": "Critical",
+  "recovery_plan": {
+    "recommended_action": "dism_restore_health | sfc_scannow | manual_check",
+    "rationale": "Why this specific tool is the best first step.",
+    "exact_command": "dism /online /cleanup-image /restorehealth"
+  },
+  "confidence_score": 0.0 to 1.0
+}`
 
 func main() {
 	provider := flag.String("provider", defaultProvider, `LLM provider ("openai" or "gemini")`)
@@ -76,7 +73,7 @@ func main() {
 		exitErr(err)
 	}
 
-	normalizedInput, err := ensureJSONArray(rawInput)
+	normalizedInput, secCtx, err := normalizeInput(rawInput)
 	if err != nil {
 		exitErr(err)
 	}
@@ -84,12 +81,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	res, err := dispatchLLM(ctx, *provider, *model, normalizedInput)
+	userPrompt := buildUserPrompt(normalizedInput, secCtx)
+	res, err := dispatchLLM(ctx, *provider, *model, userPrompt)
 	if err != nil {
 		exitErr(err)
 	}
 
-	if err := outputFormattedJSON(res); err != nil {
+	if err := outputFormattedJSON(res, secCtx); err != nil {
 		exitErr(err)
 	}
 }
@@ -106,45 +104,144 @@ func readStdinLimited(limit int64) ([]byte, error) {
 	if int64(len(buf)) > limit {
 		return nil, fmt.Errorf("stdin exceeds max-bytes (%d)", limit)
 	}
+	if len(bytes.TrimSpace(buf)) == 0 {
+		return nil, errors.New("stdin is empty")
+	}
 	return buf, nil
 }
 
-func ensureJSONArray(raw []byte) (string, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		trimmed = []byte("[]")
-	}
-
-	var arr []json.RawMessage
-	if err := json.Unmarshal(trimmed, &arr); err != nil {
-		return "", fmt.Errorf("stdin must be a JSON array: %w", err)
-	}
-	return string(trimmed), nil
+type securityContext struct {
+	MissingKBs     []string `json:"missing_kbs"`
+	RelatedCVEs    []string `json:"related_cves"`
+	Summary        string   `json:"summary"`
+	Recommendation string   `json:"recommendation"`
 }
 
-func dispatchLLM(ctx context.Context, provider, model, eventsJSON string) (string, error) {
+func normalizeInput(raw []byte) (string, securityContext, error) {
+	var sec securityContext
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return "", sec, errors.New("stdin is empty")
+	}
+	var anyVal any
+	if err := json.Unmarshal(trimmed, &anyVal); err != nil {
+		return "", sec, fmt.Errorf("stdin must be JSON: %w", err)
+	}
+	sec = extractSecurity(anyVal)
+	return string(trimmed), sec, nil
+}
+
+func extractSecurity(val any) securityContext {
+	var sec securityContext
+	switch v := val.(type) {
+	case map[string]any:
+		sec = extractSecurityFromMap(v)
+	case []any:
+		for _, it := range v {
+			part := extractSecurity(it)
+			sec.MissingKBs = append(sec.MissingKBs, part.MissingKBs...)
+			sec.RelatedCVEs = append(sec.RelatedCVEs, part.RelatedCVEs...)
+		}
+	}
+	sec.MissingKBs = uniqueStrings(sec.MissingKBs)
+	sec.RelatedCVEs = uniqueStrings(sec.RelatedCVEs)
+	if len(sec.MissingKBs) > 0 {
+		sec.Summary = "Missing KBs detected"
+		sec.Recommendation = "Install missing KBs; if update failing, run DISM/SFC with approval"
+	} else if len(sec.RelatedCVEs) > 0 {
+		sec.Summary = "Security advisories detected"
+		sec.Recommendation = "Review CVEs and ensure corresponding KBs are installed"
+	}
+	return sec
+}
+
+func extractSecurityFromMap(m map[string]any) securityContext {
+	var sec securityContext
+	if kind, ok := m["kind"].(string); ok {
+		switch strings.ToLower(kind) {
+		case "hotfix_assessment":
+			if items, ok := m["items"].([]any); ok {
+				for _, it := range items {
+					if obj, ok := it.(map[string]any); ok {
+						if kb, ok := obj["kb"].(string); ok {
+							if installed, ok := obj["installed"].(bool); ok && !installed {
+								sec.MissingKBs = append(sec.MissingKBs, kb)
+							}
+						}
+						if cve, ok := obj["cve"].(string); ok && strings.TrimSpace(cve) != "" {
+							sec.RelatedCVEs = append(sec.RelatedCVEs, cve)
+						}
+					}
+				}
+			}
+		case "cve_kb_assessment":
+			if items, ok := m["items"].([]any); ok {
+				for _, it := range items {
+					if obj, ok := it.(map[string]any); ok {
+						if cve, ok := obj["cve"].(string); ok && strings.TrimSpace(cve) != "" {
+							sec.RelatedCVEs = append(sec.RelatedCVEs, cve)
+						}
+						if kbs, ok := obj["kbCandidates"].([]any); ok {
+							for _, kb := range kbs {
+								if s, ok := kb.(string); ok && strings.TrimSpace(s) != "" {
+									sec.MissingKBs = append(sec.MissingKBs, s)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if secContext, ok := m["security"].(map[string]any); ok {
+		if mkb, ok := secContext["missing_kbs"].([]any); ok {
+			for _, kb := range mkb {
+				if s, ok := kb.(string); ok && strings.TrimSpace(s) != "" {
+					sec.MissingKBs = append(sec.MissingKBs, s)
+				}
+			}
+		}
+		if rc, ok := secContext["related_cves"].([]any); ok {
+			for _, cve := range rc {
+				if s, ok := cve.(string); ok && strings.TrimSpace(s) != "" {
+					sec.RelatedCVEs = append(sec.RelatedCVEs, s)
+				}
+			}
+		}
+	}
+	return sec
+}
+
+func dispatchLLM(ctx context.Context, provider, model, userPrompt string) (string, error) {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	switch p {
 	case "openai", "":
-		return callOpenAI(ctx, chooseModel(model, defaultOpenAIModel), eventsJSON)
+		return callOpenAI(ctx, chooseModel(model, defaultOpenAIModel), userPrompt)
 	case "gemini":
-		return callGemini(ctx, chooseModel(model, defaultGeminiModel), eventsJSON)
+		return callGemini(ctx, chooseModel(model, defaultGeminiModel), userPrompt)
 	default:
 		return "", fmt.Errorf("unsupported provider: %s", provider)
 	}
 }
 
-func callOpenAI(ctx context.Context, model, eventsJSON string) (string, error) {
+func buildUserPrompt(signalsJSON string, sec securityContext) string {
+	if len(sec.MissingKBs) == 0 && len(sec.RelatedCVEs) == 0 {
+		return fmt.Sprintf(userPromptTemplate, signalsJSON)
+	}
+	secBytes, _ := json.Marshal(sec)
+	return fmt.Sprintf(userPromptTemplate, signalsJSON) + "\nSecurity context:\n" + string(secBytes)
+}
+
+func callOpenAI(ctx context.Context, model, userPrompt string) (string, error) {
 	apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
 	if apiKey == "" {
 		return "", errors.New("OPENAI_API_KEY is not set")
 	}
 
-	userPrompt := fmt.Sprintf(userPromptTemplate, eventsJSON)
 	reqBody := struct {
-		Model       string `json:"model"`
+		Model       string  `json:"model"`
 		Temperature float64 `json:"temperature"`
-		MaxTokens   int    `json:"max_tokens,omitempty"`
+		MaxTokens   int     `json:"max_tokens,omitempty"`
 		Messages    []struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
@@ -206,13 +303,12 @@ func callOpenAI(ctx context.Context, model, eventsJSON string) (string, error) {
 	return decoded.Choices[0].Message.Content, nil
 }
 
-func callGemini(ctx context.Context, model, eventsJSON string) (string, error) {
+func callGemini(ctx context.Context, model, userPrompt string) (string, error) {
 	apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
 	if apiKey == "" {
 		return "", errors.New("GEMINI_API_KEY is not set")
 	}
 
-	userPrompt := fmt.Sprintf(userPromptTemplate, eventsJSON)
 	reqBody := struct {
 		SystemInstruction struct {
 			Parts []struct {
@@ -226,8 +322,8 @@ func callGemini(ctx context.Context, model, eventsJSON string) (string, error) {
 			} `json:"parts"`
 		} `json:"contents"`
 		GenerationConfig struct {
-			Temperature float64 `json:"temperature,omitempty"`
-			MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+			Temperature     float64 `json:"temperature,omitempty"`
+			MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
 		} `json:"generationConfig,omitempty"`
 	}{}
 
@@ -295,23 +391,52 @@ func callGemini(ctx context.Context, model, eventsJSON string) (string, error) {
 	return decoded.Candidates[0].Content.Parts[0].Text, nil
 }
 
-func outputFormattedJSON(raw string) error {
-	rawBytes := bytes.TrimSpace([]byte(raw))
+func outputFormattedJSON(raw string, secCtx securityContext) error {
+	// Markdownのコードブロック（```json ... ```）を除去する処理を追加
+	cleaned := cleanLLMOutput(raw)
+
+	rawBytes := bytes.TrimSpace([]byte(cleaned))
 	if len(rawBytes) == 0 {
 		return errors.New("LLM response is empty")
 	}
 
-	var tmp json.RawMessage
-	if err := json.Unmarshal(rawBytes, &tmp); err != nil {
-		return fmt.Errorf("LLM response is not valid JSON: %w", err)
+	var obj map[string]any
+	if err := json.Unmarshal(rawBytes, &obj); err != nil {
+		return fmt.Errorf("LLM response is not valid JSON: %w Raw: %s", err, string(rawBytes))
 	}
 
-	var buf bytes.Buffer
-	if err := json.Indent(&buf, rawBytes, "", "  "); err != nil {
-		return fmt.Errorf("format JSON: %w", err)
+	obj["security"] = secCtx
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(obj); err != nil {
+		return fmt.Errorf("encode output: %w", err)
 	}
-	_, err := buf.WriteTo(os.Stdout)
-	return err
+	return nil
+}
+
+// Markdownの装飾を取り除くヘルパー関数
+func cleanLLMOutput(content string) string {
+	content = strings.TrimSpace(content)
+	// ```json または ``` で始まる場合、それを削除
+	if strings.HasPrefix(content, "```") {
+		lines := strings.Split(content, "\n")
+		if len(lines) >= 2 {
+			// 最初の行（```json）と最後の行（```）を削除
+			// ただし中身が壊れないように慎重に処理
+			var newLines []string
+			for i, line := range lines {
+				if i == 0 && strings.HasPrefix(line, "```") {
+					continue
+				}
+				if i == len(lines)-1 && strings.HasPrefix(line, "```") {
+					continue
+				}
+				newLines = append(newLines, line)
+			}
+			return strings.Join(newLines, "\n")
+		}
+	}
+	return content
 }
 
 func chooseModel(flagVal, def string) string {
@@ -321,7 +446,22 @@ func chooseModel(flagVal, def string) string {
 	return def
 }
 
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func exitErr(err error) {
 	fmt.Fprintf(os.Stderr, "error: %v\n", err)
-	os.Exit(1)
+	os.Exit(2)
 }

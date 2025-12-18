@@ -1,0 +1,20 @@
+{
+  "kind": "cve_kb_assessment",
+  "generatedAt": "2025-01-01T00:00:00Z",
+  "items": [
+    {
+      "cve": "CVE-2024-30078",
+      "title": "Sample advisory",
+      "severity": "Important",
+      "productHints": [
+        "Windows Server 2019",
+        "Windows 11"
+      ],
+      "kbCandidates": [
+        "KB5034123"
+      ],
+      "notes": "KB candidates extracted from text"
+    }
+  ],
+  "errors": []
+}

@@ -52,6 +52,24 @@ This repository provides the **first primitive** of that system: a safe, auditab
 
 ---
 
+## Before / After
+
+**Before**
+
+- RDP login
+- Event Viewer search
+- KB / DISM manual investigation
+- Runbooks, approvals, and reporting by hand
+
+**After (WinOps Guard)**
+
+- Headless signal collection
+- AI triage with rationale
+- Approved single-step remediation
+- Audit JSON auto-generated
+
+---
+
 ## What this repository provides (current)
 
 A **Windows-only CLI toolchain** that queries the native Windows Event Log using `wevtapi` and emits **AI-friendly JSON**, enabling:
@@ -60,6 +78,12 @@ A **Windows-only CLI toolchain** that queries the native Windows Event Log using
 - LLM-based root cause analysis
 - Policy-driven remediation workflows
 - Removal of RDP from incident response paths
+
+### Highlight: Windows Update self-healing
+
+- Detect Windows Update failures and servicing health issues from `System` / `Setup` / `WindowsUpdateClient`
+- Propose exactly one safe action per run (DISM / SFC / cache reset)
+- Always approval-gated (no silent changes), with audit JSON output
 
 ### Current capabilities
 
@@ -148,6 +172,15 @@ Windows ops has remained stuck in a 2010 workflow. LLMs make autonomous Windows 
 
 ## Target users
 
+**Who pays first (ICP):**
+
+- Teams operating **50+ Windows Server** machines
+- Update / servicing and IIS incidents occur weekly or monthly
+- RDP is restricted (security policy) or expensive (compliance/ops overhead)
+- Audit requirements: changes must be explainable and logged
+
+Also:
+
 - MSPs managing dozens to hundreds of Windows Servers
 - Enterprises with long-lived Windows infrastructure
 - Teams fatigued by RDP-driven, on-call-heavy operations
@@ -180,6 +213,10 @@ Slack / API / Control Plane
 
 ```powershell
 go build -o winopsguard.exe .
+go build -o winopsguard-triage.exe ./cmd/winopsguard-triage
+go build -o winopsguard-cvekb.exe ./cmd/winopsguard-cvekb
+go build -o winopsguard-assess-hotfix.exe ./cmd/winopsguard-assess-hotfix
+go build -o winopsguard-remediate-update.exe ./cmd/winopsguard-remediate-update
 ```
 
 ### Run: collector
@@ -188,10 +225,18 @@ go build -o winopsguard.exe .
 .\winopsguard.exe -minutes 60 -max 200
 ```
 
+- `-log application|system|setup` (default: `application`)
+- `-provider <ProviderName>` to filter by event provider (e.g. `Microsoft-Windows-WindowsUpdateClient`)
+
+Example (Windows Update provider on Setup log):
+
+```powershell
+.\winopsguard.exe -log setup -minutes 120 -max 400 -provider Microsoft-Windows-WindowsUpdateClient
+```
+
 ### Triage CLI (LLM)
 
 ```powershell
-go build -o winopsguard-triage.exe ./cmd/winopsguard-triage
 setx OPENAI_API_KEY "..."
 # or
 setx GEMINI_API_KEY "..."
@@ -199,6 +244,37 @@ setx GEMINI_API_KEY "..."
 .\winopsguard.exe -minutes 60 -max 200 |
   .\winopsguard-triage.exe -provider openai
 ```
+
+### Windows Update self-healing (single-step, approved)
+
+```powershell
+.\winopsguard.exe -log system -minutes 120 -max 400 -provider Microsoft-Windows-WindowsUpdateClient |
+  .\winopsguard-triage.exe -provider openai |
+  .\winopsguard-remediate-update.exe
+```
+
+- Approved, single-step remediation (one per run): `dism /online /cleanup-image /restorehealth`, `sfc /scannow`, or Update cache reset (BITS/WUA stop, SoftwareDistribution rename, start).
+- DISM/SFC/cache reset can take time and may require an elevated console depending on the system.
+- The remediation CLI always prompts for approval; there is no fully automatic path.
+- If the issue is not applicable or approval is denied, it returns `executed=false` with `exitCode=0` (noop is success for control planes/agents).
+
+Example remediation output (approved, executed):
+
+```json
+{"action":"dism_restorehealth","approved":true,"executed":true,"startedAt":"2025-12-18T00:00:00Z","finishedAt":"2025-12-18T00:10:00Z","exitCode":0,"stdout":"...","stderr":"","error":"","reason":"windows update signals detected; recommended action matched DISM","securityContext":{"missing_kbs":["KB5034123"],"related_cves":["CVE-2024-30078"]},"command":"dism.exe /online /cleanup-image /restorehealth"}
+```
+
+### CVE → KB → hotfix assessment → update remediation
+
+```powershell
+type testdata\cve_text_input.txt | .\winopsguard-cvekb.exe |
+  .\winopsguard-assess-hotfix.exe |
+  .\winopsguard-triage.exe -provider openai |
+  .\winopsguard-remediate-update.exe
+```
+
+- **Windows Update self-healing**: still single-step and always approval-gated.
+- The pipeline accepts CVE text or triage JSON, extracts CVE/KB, checks installed hotfixes, and feeds security context into triage/remediation.
 
 ### Slack notification
 
@@ -254,12 +330,23 @@ This command will prompt for explicit approval before it runs `iisreset`.
 - All actions require explicit approval
 - Narrow, whitelisted actions only
 - Full auditability of proposed and executed actions
+- Exit codes: `0` success or noop (not applicable / not approved), `2` for invalid input, missing env/config, or execution errors.
 
 WinOps Guard is designed to reduce operational risk, not introduce it.
+
+## Design principles
+
+- No silent changes
+- No multi-step automation
+- No state drift by default
+- Humans approve, AI explains
+- Every action produces an audit JSON record
 
 ---
 
 ## Roadmap
+
+Planned (not implemented yet):
 
 WinOps Guard will evolve into a full headless Windows Ops platform:
 
@@ -295,6 +382,8 @@ WinOps Guard augments operators - it does not remove accountability.
 ## Team
 
 Built by engineers with hands-on experience operating Windows-based infrastructure in production environments.
+
+Built by engineers who have spent years operating Windows infrastructure under strict security and audit constraints.
 
 This project comes from firsthand exposure to RDP-driven, on-call-heavy Windows operations that modern tooling ignores.
 
