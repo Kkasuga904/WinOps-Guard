@@ -1,18 +1,246 @@
 # WinOps Guard
 
-**Headless Windows Operations, powered by AI**
+## TL;DR (for design partners)
 
-> WinOps Guard is an AI SRE for Windows - it detects, explains, and safely remediates incidents without RDP.
-
-WinOps Guard is an early prototype of an **AI-native, headless Windows operations platform**.
-
-It removes RDP, Event Viewer, and manual log inspection from incident response by converting Windows Server state into **machine-readable signals and actionable decisions**.
-
-**Goal:** operate Windows infrastructure without logging in.
+- WinOps Guard is a Windows-focused, safety-first CLI toolchain for approval-gated remediation with audit-grade JSON output.
+- Built for MSP leads and enterprise IT/SRE owners operating **50+ Windows Servers** under RDP restrictions and audit/traceability requirements.
+- Problem it addresses: Windows incidents (Update/servicing, IIS) often degrade into RDP-driven, person-dependent fixes with weak evidence trails.
+- What’s different: Windows-native signal collection + AI explanation + **explicit human approval** + **single-step, whitelisted** actions + machine-readable audit records.
+- Usable MVP today: the CLI pipelines below. Planned (not implemented yet): signed agent, RBAC control plane, policy approvals, immutable centralized audit logs.
+- Primary value: incident owners and IT managers can **defend remediation decisions** during audits, post-incident reviews, and customer inquiries — without relying on screenshots, chat logs, or operator memory.
 
 ---
 
-## 60-second demo (no RDP)
+## Why now / why buy
+
+If you are accountable for Windows operations, the hard part is not “running a command.” It’s making the decision safely and being able to defend it later:
+
+- Senior Windows operators are scarce; institutional knowledge tends to concentrate in a few people.
+- RDP-based incident response is slow, hard to govern, and difficult to audit.
+- In regulated or customer-facing environments, you need repeatability: **who approved what, when, why, and what changed**.
+
+WinOps Guard is intentionally narrow: it helps you produce a reasoned recommendation and execute exactly one safe step, only after explicit approval, with an audit record you can keep.
+
+In many organizations, the hardest part of Windows incident response is not fixing the issue.
+It is explaining — weeks or months later — **why a specific action was taken, by whom, and based on what evidence**.
+
+WinOps Guard exists to make that explanation reliable, repeatable, and defensible by default.
+
+---
+
+## Operational Risk Without This
+
+- RDP-first remediation does not hold up well in audits and post-incident review because the decision path is implicit and hard to reconstruct.
+- Screenshots, chat logs, and operator memory are not durable or queryable evidence; they do not provide reliable, repeatable accountability.
+- Senior Windows operators become single points of failure when only a few people can diagnose and choose safe recovery steps under pressure.
+- Explaining why a change was made is often harder than executing it, especially when evidence is scattered across tools and time.
+
+---
+
+## Who this is for / not for
+
+### For
+
+- MSP and enterprise teams operating **50+ Windows Servers**
+- Environments where Update/servicing issues and IIS incidents happen weekly/monthly
+- Organizations with RDP restrictions (security policy, jump hosts, audit controls)
+- Teams that need explainability and evidence for audits, customer reporting, or change governance
+
+### Not for
+
+- Fully autonomous remediation (unattended “self-healing” without approvals)
+- General-purpose AI agents that can run arbitrary commands
+- Replacing Microsoft tooling (Windows Update/WSUS, DISM, SFC) or your monitoring/SIEM stack
+
+---
+
+## Who is accountable without this
+
+Without an explicit decision and audit layer, accountability typically falls on:
+
+- A small number of senior Windows operators who "just know what to do"
+- Incident owners who must explain decisions after the fact without durable evidence
+- Managers who approve changes but cannot reconstruct the technical rationale later
+
+WinOps Guard reduces this risk by producing a structured, machine-readable record
+of **what was proposed, why it was proposed, who approved it, and what actually ran**.
+
+---
+
+## Microsoft relationship (not a replacement)
+
+WinOps Guard does not replace Microsoft components or admin tooling. It uses Windows-native signals and Microsoft repair tools and adds a missing “decision/approval/audit” layer:
+
+- Not replacing: Windows Event Log, Windows Update/WSUS, DISM, SFC, existing monitoring and SIEM
+- Complementing: Windows-specific decision support, explicit approvals, and audit-grade JSON output per action
+
+WinOps Guard does not replace Microsoft tooling. It operates above native Windows signals and uses Microsoft-provided repair commands.
+Its role is decision, approval, and audit, which Microsoft tools intentionally leave to operational processes.
+
+This layer — decision, approval, and audit — is intentionally outside the scope of Microsoft tooling,
+and is where most operational and compliance risk accumulates in real environments.
+
+---
+
+## Architecture (at a glance)
+
+This diagram shows the decision → approval → execution → audit flow. No action is executed without explicit human approval. Each run produces an auditable JSON record.
+
+```mermaid
+
+flowchart TD
+
+A[Windows Event Log] --> B[WinOps Guard Collector]
+
+B --> C[Structured JSON]
+
+C --> D[AI Triage (LLM)]
+
+D -->|Propose ONE safe action| E[Human Approval]
+
+E -->|No| F[Audit JSON (noop)]
+
+E -->|Yes| G[Whitelisted Command]
+
+G --> H[DISM / SFC / IIS]
+
+H --> I[Audit JSON (executed)]
+
+```
+
+## What you get today / what’s planned
+
+| Area | Today (Implemented) | Planned (Design Intent / not implemented yet) |
+| --- | --- | --- |
+| Signal collection | Windows Event Log collector (`winopsguard.exe`) with `-log` and `-provider` filtering | Signed, least-privilege agent |
+| Triage | `winopsguard-triage` calls OpenAI or Gemini and returns JSON triage | Pluggable providers including self-hosted/offline |
+| Remediation | Approval-gated, **single-step** remediation CLIs (Windows Update repair, IIS reset) | Policy-driven approvals (manual/auto), deterministic rules per incident type |
+| Auditability | Each remediation emits a JSON audit record to stdout | Centralized, tamper-evident audit storage + SIEM/ITSM export |
+| Governance | Human approval gate + narrow whitelists | RBAC, policy engine, execution attestation |
+
+---
+
+## 1-minute Quickstart (no RDP)
+
+Prereqs:
+
+- Windows PowerShell
+- Go (to build the CLIs)
+- An LLM API key (`OPENAI_API_KEY` or `GEMINI_API_KEY`)
+
+Build:
+
+```powershell
+go build -o winopsguard-triage.exe ./cmd/winopsguard-triage
+go build -o winopsguard-remediate-update.exe ./cmd/winopsguard-remediate-update
+```
+
+Run a demo with bundled test data (approval prompt is on stderr; answering `no` still returns an audit JSON record):
+
+```powershell
+$env:OPENAI_API_KEY = "..."
+type testdata\windows_update_corruption.json |
+  .\winopsguard-triage.exe -provider openai |
+  .\winopsguard-remediate-update.exe
+```
+
+---
+
+## Why this is safe (and not a generic agent)
+
+WinOps Guard is built to avoid the main failure modes of “AI that changes systems”:
+
+- **No silent changes:** every remediation requires explicit approval (`yes`/`y` only).
+- **No multi-step automation:** one run performs **one** action.
+- **No arbitrary execution:** remediations are fixed, whitelisted commands only.
+- **Audit by default:** proposed/executed actions emit machine-readable JSON (what/when/why/result).
+
+---
+
+## Data handling & privacy (current behavior)
+
+### What data is sent to the LLM?
+
+- `winopsguard-triage` sends the JSON received on stdin to the configured provider (OpenAI or Gemini) as part of the prompt.
+- Event log messages can contain environment-specific identifiers (hostnames, usernames, paths). Treat inputs as potentially sensitive.
+
+### Are raw logs sent by default?
+
+- If you pipe raw Event Log JSON into `winopsguard-triage`, that content is sent to the LLM provider.
+
+### Masking / filtering expectations
+
+- This repository does not guarantee complete redaction before LLM submission.
+- For sensitive environments, redact/filter inputs before `winopsguard-triage`, or run PoCs on non-production data first.
+
+### Offline / self-hosted LLM compatibility
+
+- Not implemented yet. Today, `winopsguard-triage` supports OpenAI and Gemini via HTTPS.
+- Design intent is provider-pluggability without changing pipeline shape.
+
+---
+
+## Security model (design intent)
+
+This section describes intended enterprise properties. These are **design goals, not implemented features**.
+
+- **Execution privilege:** a signed, least-privilege agent with clear privilege boundaries (today, CLIs run with the invoking user’s privileges).
+- **Approval gate:** prevent unapproved change and clarify accountability (approver/executor).
+- **Audit retention:** centralized, tamper-evident audit storage and export (today, audit JSON is emitted to stdout).
+- **Policy:** deterministic remediation rules and policy-driven approvals per incident type.
+
+---
+
+## Enterprise readiness (design intent)
+
+WinOps Guard is currently a CLI MVP. For enterprise deployment, the intended division of responsibility is:
+
+- **Agent:** signed distribution, least privilege, local collection/execution, local buffering/queueing, policy enforcement
+- **Control plane:** RBAC, approval workflows, audit retention, fleet management, SIEM/ITSM integrations
+
+These are design goals, not yet implemented features.
+
+---
+
+## What this is NOT (procurement-oriented)
+
+- Not a replacement for Microsoft tools (Windows Update/WSUS, DISM, SFC, Event Viewer).
+- Not a replacement for monitoring or SIEM (designed to coexist with Datadog/Ansible/Splunk-style stacks).
+- Not an arbitrary command runner.
+- Not unattended remediation.
+
+---
+
+## Usage (details)
+
+### Build (CLI toolchain)
+
+```powershell
+go build -o winopsguard.exe .
+go build -o winopsguard-triage.exe ./cmd/winopsguard-triage
+go build -o winopsguard-remediate-update.exe ./cmd/winopsguard-remediate-update
+go build -o winopsguard-remediate-iis.exe ./cmd/winopsguard-remediate-iis
+go build -o winopsguard-notify-slack.exe ./cmd/winopsguard-notify-slack
+go build -o winopsguard-cvekb.exe ./cmd/winopsguard-cvekb
+go build -o winopsguard-assess-hotfix.exe ./cmd/winopsguard-assess-hotfix
+```
+
+### Collector: Windows Event Log
+
+```powershell
+.\winopsguard.exe -minutes 60 -max 200
+```
+
+- `-log application|system|setup` (default: `application`)
+- `-provider <ProviderName>` filters by event provider (e.g., `Microsoft-Windows-WindowsUpdateClient`)
+
+Example:
+
+```powershell
+.\winopsguard.exe -log setup -minutes 120 -max 400 -provider Microsoft-Windows-WindowsUpdateClient
+```
+
+### Windows Update remediation (approval-gated, single-step)
 
 ```powershell
 type testdata\windows_update_corruption.json |
@@ -20,266 +248,15 @@ type testdata\windows_update_corruption.json |
   .\winopsguard-remediate-update.exe
 ```
 
-Result:
+Notes:
 
-- AI explains root cause (0x800f081f)
-- Proposes exactly one safe action (DISM RestoreHealth)
-- Requires explicit approval
-- Emits audit JSON (who / when / why / what)
+- Approval prompt is printed to stderr; only `yes`/`y` executes.
+- Exactly one whitelisted action is executed per run, and one audit JSON object is emitted to stdout.
+- `executed=false` with `exitCode=0` is a noop (not applicable / not approved).
 
-## Problem
+### CVE/KB assessment (optional; conservative by design)
 
-Windows operations today still rely on:
-
-- RDP and Event Viewer
-- Manual log inspection and copy/paste into tickets or chats
-- Human-driven incident triage
-- Slow MTTR, on-call burnout, fragile and expensive ops
-
-Millions of Windows Servers still run critical workloads across finance, healthcare, manufacturing, and government - yet most modern ops tooling is Linux-first and cloud-native, and largely ignores Windows-specific pain.
-
----
-
-## Market context
-
-- Tens of millions of Windows Server instances are still operating globally
-- Highly concentrated in regulated, slow-moving industries
-- High operational cost, low automation penetration
-- Pain is deep, persistent, and largely unsolved
-
-This is a large, neglected market.
-
-Primary buyers are MSPs and enterprises paying per-server operational costs.
-
----
-
-## Solution
-
-Treat Windows operations as **headless**:
-
-1. Collect operational signals directly from Windows internals
-2. Convert them into structured, AI-readable data
-3. Perform automated triage and reasoning
-4. Surface decisions through APIs and chat tools
-5. Execute approved remediation safely and auditably
-
-This repository provides the **first primitive** of that system: a safe, auditable signal -> decision -> action loop for Windows operations.
-
----
-
-## Before / After
-
-**Before**
-
-- RDP login
-- Event Viewer search
-- KB / DISM manual investigation
-- Runbooks, approvals, and reporting by hand
-
-**After (WinOps Guard)**
-
-- Headless signal collection
-- AI triage with rationale
-- Approved single-step remediation
-- Audit JSON auto-generated
-
----
-
-## What this repository provides (current)
-
-A **Windows-only CLI toolchain** that queries the native Windows Event Log using `wevtapi` and emits **AI-friendly JSON**, enabling:
-
-- Automated incident triage
-- LLM-based root cause analysis
-- Policy-driven remediation workflows
-- Removal of RDP from incident response paths
-
-### Highlight: Windows Update self-healing
-
-- Detect Windows Update failures and servicing health issues from `System` / `Setup` / `WindowsUpdateClient`
-- Propose exactly one safe action per run (DISM / SFC / cache reset)
-- Always approval-gated (no silent changes), with audit JSON output
-
-### Current capabilities
-
-- Query Application event log entries from the last N minutes
-- Fetch events in batches
-- Render each event to XML and human-readable messages
-- Emit structured JSON per event:
-  - `timeGenerated`
-  - `level`
-  - `eventId`
-  - `source`
-  - `message`
-
----
-
-## Why this matters
-
-Windows Event Logs are:
-
-- Structured (XML-based)
-- Extremely rich in operational signal
-- Locked behind GUI tools and RDP workflows
-
-By exposing them as data, incidents become **programmable**.
-
-This enables:
-
-- Machine-driven triage
-- AI-assisted reasoning
-- Auditable, repeatable operations
-- Less human intervention and reduced on-call load
-
----
-
-## What this is NOT
-
-To avoid confusion:
-
-- Not a monitoring dashboard
-- Not another log shipper
-- Not a PowerShell wrapper
-- Not a general-purpose AI agent
-
-WinOps Guard is an **operations execution layer**, not a visualization tool.
-
----
-
-## Why existing tools fail on Windows ops
-
-| Existing approach | Limitation |
-| --- | --- |
-| Datadog / New Relic | Alerting only, no remediation loop |
-| PowerShell scripts | Manual, brittle, human-driven |
-| RDP + Event Viewer | GUI-locked, non-automatable |
-| Generic AI agents | Unsafe, no Windows domain constraints |
-
-WinOps Guard focuses on **safe, narrow, Windows-native operations**.
-
----
-
-## Why now?
-
-Before LLMs:
-
-- Logs could be collected
-- But reasoning and decision-making stayed human
-
-With LLMs:
-
-- Logs become explainable system state
-- Root cause analysis can be automated
-- Remediation can be proposed with confidence and auditability
-
-Windows ops has remained stuck in a 2010 workflow. LLMs make autonomous Windows operations finally possible.
-
----
-
-## Initial focus
-
-- IIS failures and Windows service outages
-- Approved restart-based remediation
-- MTTR reduction for MSP-style operations
-- Safe, auditable automation for production Windows servers
-
----
-
-## Target users
-
-**Who pays first (ICP):**
-
-- Teams operating **50+ Windows Server** machines
-- Update / servicing and IIS incidents occur weekly or monthly
-- RDP is restricted (security policy) or expensive (compliance/ops overhead)
-- Audit requirements: changes must be explainable and logged
-
-Also:
-
-- MSPs managing dozens to hundreds of Windows Servers
-- Enterprises with long-lived Windows infrastructure
-- Teams fatigued by RDP-driven, on-call-heavy operations
-
----
-
-## Architecture (current)
-
-```text
-Windows Event Log
-  |
-WinOps Guard (collector)
-  |
-Structured JSON
-  |
-LLM-based triage
-  |
-Approval gate
-  |
-Safe remediation
-  |
-Slack / API / Control Plane
-```
-
----
-
-## Usage
-
-### Build: collector
-
-```powershell
-go build -o winopsguard.exe .
-go build -o winopsguard-triage.exe ./cmd/winopsguard-triage
-go build -o winopsguard-cvekb.exe ./cmd/winopsguard-cvekb
-go build -o winopsguard-assess-hotfix.exe ./cmd/winopsguard-assess-hotfix
-go build -o winopsguard-remediate-update.exe ./cmd/winopsguard-remediate-update
-```
-
-### Run: collector
-
-```powershell
-.\winopsguard.exe -minutes 60 -max 200
-```
-
-- `-log application|system|setup` (default: `application`)
-- `-provider <ProviderName>` to filter by event provider (e.g. `Microsoft-Windows-WindowsUpdateClient`)
-
-Example (Windows Update provider on Setup log):
-
-```powershell
-.\winopsguard.exe -log setup -minutes 120 -max 400 -provider Microsoft-Windows-WindowsUpdateClient
-```
-
-### Triage CLI (LLM)
-
-```powershell
-setx OPENAI_API_KEY "..."
-# or
-setx GEMINI_API_KEY "..."
-
-.\winopsguard.exe -minutes 60 -max 200 |
-  .\winopsguard-triage.exe -provider openai
-```
-
-### Windows Update self-healing (single-step, approved)
-
-```powershell
-.\winopsguard.exe -log system -minutes 120 -max 400 -provider Microsoft-Windows-WindowsUpdateClient |
-  .\winopsguard-triage.exe -provider openai |
-  .\winopsguard-remediate-update.exe
-```
-
-- Approved, single-step remediation (one per run): `dism /online /cleanup-image /restorehealth`, `sfc /scannow`, or Update cache reset (BITS/WUA stop, SoftwareDistribution rename, start).
-- DISM/SFC/cache reset can take time and may require an elevated console depending on the system.
-- The remediation CLI always prompts for approval; there is no fully automatic path.
-- If the issue is not applicable or approval is denied, it returns `executed=false` with `exitCode=0` (noop is success for control planes/agents).
-
-Example remediation output (approved, executed):
-
-```json
-{"action":"dism_restorehealth","approved":true,"executed":true,"startedAt":"2025-12-18T00:00:00Z","finishedAt":"2025-12-18T00:10:00Z","exitCode":0,"stdout":"...","stderr":"","error":"","reason":"windows update signals detected; recommended action matched DISM","securityContext":{"missing_kbs":["KB5034123"],"related_cves":["CVE-2024-30078"]},"command":"dism.exe /online /cleanup-image /restorehealth"}
-```
-
-### CVE → KB → hotfix assessment → update remediation
+This pipeline detects CVE/KB references and checks installed hotfixes, but does **not** automatically install KBs.
 
 ```powershell
 type testdata\cve_text_input.txt | .\winopsguard-cvekb.exe |
@@ -288,122 +265,23 @@ type testdata\cve_text_input.txt | .\winopsguard-cvekb.exe |
   .\winopsguard-remediate-update.exe
 ```
 
-- **Windows Update self-healing**: still single-step and always approval-gated.
-- The pipeline accepts CVE text or triage JSON, extracts CVE/KB, checks installed hotfixes, and feeds security context into triage/remediation.
+### Exit codes (common pattern)
 
-### Slack notification
-
-```powershell
-go build -o winopsguard-notify-slack.exe ./cmd/winopsguard-notify-slack
-setx SLACK_WEBHOOK_URL "https://hooks.slack.com/services/XXX/YYY/ZZZ"
-
-.\winopsguard.exe -minutes 60 -max 200 |
-  .\winopsguard-triage.exe -provider openai |
-  .\winopsguard-notify-slack.exe
-
-.\winopsguard.exe -minutes 60 -max 200 |
-  .\winopsguard-triage.exe -provider openai |
-  .\winopsguard-notify-slack.exe -dry-run
-```
-
-Exit codes (notify-slack):
-
-- `0`: posted / no-op (`info`) / dry-run
-- `2`: missing env, invalid input, HTTP failure, other errors
-
-### Safe remediation (IIS)
-
-```powershell
-go build -o winopsguard-remediate-iis.exe ./cmd/winopsguard-remediate-iis
-
-.\winopsguard.exe -minutes 60 -max 200 |
-  .\winopsguard-triage.exe -provider openai |
-  .\winopsguard-remediate-iis.exe
-```
-
-This command will prompt for explicit approval before it runs `iisreset`.
-
-### Example output (collector)
-
-```json
-[
-  {
-    "timeGenerated": "2025-12-17T06:51:17Z",
-    "level": "Information",
-    "eventId": 1040,
-    "source": "MsiInstaller",
-    "message": "Beginning a Windows Installer transaction..."
-  }
-]
-```
+- `0`: success or noop (including not applicable / not approved)
+- `2`: invalid input, missing env/config, or other fatal errors
 
 ---
 
-## Safety model
+## Roadmap (planned / not implemented yet)
 
-- No automatic remediation by default
-- All actions require explicit approval
-- Narrow, whitelisted actions only
-- Full auditability of proposed and executed actions
-- Exit codes: `0` success or noop (not applicable / not approved), `2` for invalid input, missing env/config, or execution errors.
-
-WinOps Guard is designed to reduce operational risk, not introduce it.
-
-## Design principles
-
-- No silent changes
-- No multi-step automation
-- No state drift by default
-- Humans approve, AI explains
-- Every action produces an audit JSON record
-
----
-
-## Roadmap
-
-Planned (not implemented yet):
-
-WinOps Guard will evolve into a full headless Windows Ops platform:
-
-- Always-on Windows agent (native Windows Service)
-- Central control plane
-- Policy-driven remediation
-- AI-assisted and approved recovery actions
-- Fully headless, no-RDP workflows
-
-Long-term vision: AI SRE for Windows infrastructure.
-
----
-
-## Non-goals
-
-- General-purpose AI agent
-- Arbitrary command execution
-- Replacement for human operators
-
-WinOps Guard augments operators - it does not remove accountability.
-
----
-
-## Implementation notes
-
-- Native `wevtapi` (no PowerShell dependency)
-- Proper Win32 handle management
-- Errors surfaced explicitly (no panics)
-- Designed for long-running agent use
-
----
-
-## Team
-
-Built by engineers with hands-on experience operating Windows-based infrastructure in production environments.
-
-Built by engineers who have spent years operating Windows infrastructure under strict security and audit constraints.
-
-This project comes from firsthand exposure to RDP-driven, on-call-heavy Windows operations that modern tooling ignores.
+- Always-on Windows agent (signed, least-privilege)
+- Central control plane (RBAC, policy, approvals)
+- Policy-driven approval modes (manual/auto)
+- Durable/immutable audit logs (SIEM/ITSM export)
+- Additional triage providers (including self-hosted/offline)
 
 ---
 
 ## License
 
-TBD (MIT / Apache-2.0 planned)
+Apache-2.0. See `LICENSE`.
