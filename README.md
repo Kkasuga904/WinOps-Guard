@@ -86,6 +86,16 @@ and is where most operational and compliance risk accumulates in real environmen
 
 This diagram shows the decision → approval → execution → audit flow. No action is executed without explicit human approval. Each run produces an auditable JSON record.
 
+---
+
+> [!IMPORTANT]
+> ### ⚠️ Safety First & Human-in-the-loop
+> WinOps Guard will **never** execute any system change without explicit human approval.
+> It does not perform unattended remediation, does not run arbitrary commands, 
+> and is designed specifically for environments where **auditability** and **change accountability** are mandatory.
+
+---
+
 ```mermaid
 flowchart TD
     A["Windows Event Log"] --> B["WinOps Guard Collector"]
